@@ -715,7 +715,6 @@ get_v4_canonical_headers(const req_info& info,
                    std::back_inserter(token_env), [](const int c) {
                      return c == '-' ? '_' : c == '_' ? '-' : std::toupper(c);
                    });
-
     if (token_env == "HTTP_CONTENT_LENGTH") {
       token_env = "CONTENT_LENGTH";
     } else if (token_env == "HTTP_CONTENT_TYPE") {
@@ -752,6 +751,41 @@ get_v4_canonical_headers(const req_info& info,
     }
 
     canonical_hdrs_map[token] = rgw_trim_whitespace(token_value);
+  }
+
+  // https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html
+  // gives us a list of headers that must be signed if they are present.
+
+  // `host` is always required.
+  if (!canonical_hdrs_map.contains("host")) {
+    dout(5) << "Signature rejected: CanonicalHeaders must contain `host`." << dendl;
+    return boost::none;
+  }
+  // If `content-type` is present, it must be in CanonicalHeaders
+  if (info.env->exists("CONTENT_TYPE") &&
+      !canonical_hdrs_map.contains("content-type")) {
+    dout(5) << "Signature rejected: 'content-type' supplied but not in CanonicalHeaders." << dendl;
+    return boost::none;
+  }
+  // Any header starting with `x-amz-` must be in CanonicalHeaders
+  const auto& emap = info.env->get_map();
+  static const std::string xamz{"HTTP_X_AMZ_"};
+  for (auto i = emap.lower_bound(xamz);
+       i != emap.end() && boost::istarts_with(i->first, xamz);
+       ++i) {
+    const std::string_view env_key =
+      std::string_view(i->first).substr(sarrlen("HTTP_"));
+    std::string lower_key;
+    lower_key.reserve(env_key.size());
+    std::transform(std::begin(env_key), std::end(env_key),
+                   std::back_inserter(lower_key), [](const int c) {
+                     return c == '_' ? '-' : std::tolower(c);
+                   });
+    if (!canonical_hdrs_map.contains(lower_key)) {
+      dout(5) << "Signature rejected: '" << lower_key
+      << "' supplied, but not in CanonicalHeaders." << dendl;
+      return boost::none;
+    }
   }
 
   std::string canonical_hdrs;
